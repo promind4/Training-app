@@ -6,7 +6,7 @@
 
 const INITIAL_DATA = {
   profil: {
-    nom: "Alex",
+    nom: "Kesiah",
     age: 28,
     taille_cm: 190,
     poids_kg: 122,
