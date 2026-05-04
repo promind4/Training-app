@@ -400,7 +400,7 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   const [exerciceIdx, setExerciceIdx] = useState(0);
   const [serieIdx, setSerieIdx] = useState(0);
   const [completedSeries, setCompletedSeries] = useState({});
-  const [exerciseLoads, setExerciseLoads] = useState({}); // { exerciseId: { serieIdx: load } }
+  const [exerciseLoads, setExerciseLoads] = useState({});
 
   const [timerActive, setTimerActive] = useState(false);
   const [timerLeft, setTimerLeft] = useState(0);
@@ -409,9 +409,17 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   const [customRest, setCustomRest] = useState(null);
   const intervalRef = useRef(null);
 
+  // Refs to hold latest values for the timer callback (avoids stale closures)
+  const serieIdxRef = useRef(serieIdx);
+  const exerciceIdxRef = useRef(exerciceIdx);
+  useEffect(() => { serieIdxRef.current = serieIdx; }, [serieIdx]);
+  useEffect(() => { exerciceIdxRef.current = exerciceIdx; }, [exerciceIdx]);
+
   const exercices = session.exercices;
   const current = exercices[exerciceIdx];
   const totalSeries = current?.series || 1;
+  const totalSeriesRef = useRef(totalSeries);
+  useEffect(() => { totalSeriesRef.current = totalSeries; }, [totalSeries]);
   const currentRest = customRest !== null ? customRest : (current?.repos_sec || 60);
 
   let totalSets = exercices.reduce((s, e) => s + e.series, 0);
@@ -426,18 +434,20 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
             clearInterval(intervalRef.current);
             setTimerActive(false);
             beep(660, 400); vibrate(500);
-            
-            // Auto-advance
-            if (serieIdx < totalSeries - 1) {
-              setSerieIdx(s => s + 1);
-            } else if (exerciceIdx < exercices.length - 1) {
-              setExerciceIdx(i => i + 1);
+
+            // Auto-advance using refs for fresh values
+            const curSerie = serieIdxRef.current;
+            const curExo = exerciceIdxRef.current;
+            const curTotalSeries = totalSeriesRef.current;
+            if (curSerie < curTotalSeries - 1) {
+              setSerieIdx(curSerie + 1);
+            } else if (curExo < exercices.length - 1) {
+              setExerciceIdx(curExo + 1);
               setSerieIdx(0);
               setCustomRest(null);
             }
             return 0;
           }
-
           return t - 1;
         });
       }, 1000);
@@ -1100,7 +1110,7 @@ function HistoryScreen({ tweaks }) {
 }
 
 // ─── PROFILE ─────────────────────────────────────────────────
-function ProfileScreen({ tweaks }) {
+function ProfileScreen({ tweaks, onReset }) {
   const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
   // Read latest weight from log
   const weightLog = loadState('weight_log', []);
