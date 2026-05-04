@@ -1205,11 +1205,32 @@ function App() {
   // Custom exercise overrides stored per session id
   const [sessionOverrides, setSessionOverrides] = useState(() => loadState('session_overrides', {}));
 
-  const today = new Date();
+  // Auto-refresh date when the user returns to the app or at midnight
+  const [currentDate, setCurrentDate] = useState(() => new Date());
+  useEffect(() => {
+    // Check every 30 seconds if the date has changed
+    const timer = setInterval(() => {
+      const now = new Date();
+      if (now.toDateString() !== currentDate.toDateString()) {
+        setCurrentDate(now);
+      }
+    }, 30000);
+    // Also check when the app becomes visible again (user switches back to it)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        setCurrentDate(new Date());
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
+  }, [currentDate]);
+
+  const today = currentDate;
   const dayNames = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
   const todayName = dayNames[today.getDay()];
   const currentPlanning = planning === '5j' ? TRAINING_DATA.planning_5j : TRAINING_DATA.planning_4j;
   const isTrainingDay = currentPlanning.some(s => s.jour === todayName);
+
 
   function getSession(session) {
     const overrides = sessionOverrides[session.id];
