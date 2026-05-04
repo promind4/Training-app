@@ -1,0 +1,17 @@
+{
+  "name": "TRAINING — Coach de poche",
+  "short_name": "TRAINING",
+  "description": "Votre coach sportif et nutritionnel personnalisé.",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#0A0A0A",
+  "theme_color": "#F97316",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

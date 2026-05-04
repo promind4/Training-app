@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRAINING — Coach de poche</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<!-- PWA & Mobile Optimization -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#F97316">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TRAINING">
+<link rel="apple-touch-icon" href="icon.png">
+
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="data.js"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #111; font-family: 'DM Sans', sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  #root { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 100vh; }
+  ::-webkit-scrollbar { width: 0; }
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+  select { appearance: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// Service Worker Registration
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(err => console.log('SW reg failed:', err));
+  });
+}
+
+
+// ─── TOKENS ─────────────────────────────────────────────────
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accentColor": "#F97316",
+  "bgColor": "#0A0A0A",
+  "cardColor": "#161616",
+  "textPrimary": "#F5F5F5",
+  "textMuted": "#666",
+  "planning": "5j"
+}/*EDITMODE-END*/;
+
+// ─── HELPERS ────────────────────────────────────────────────
+function pad(n) { return String(n).padStart(2, '0'); }
+function fmtTime(s) { return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; }
+function todayKey() { return new Date().toISOString().slice(0, 10); }
+
+// Audio/Vibration helpers
+function beep(freq = 440, duration = 200) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.type = 'sine'; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration/1000);
+    osc.start(); osc.stop(ctx.currentTime + duration/1000);
+  } catch (e) { console.warn("Beep failed", e); }
+}
+
+function vibrate(ms = 200) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+
+function CircularTimer({ total, current, color = '#F97316', size = 200, strokeWidth = 10 }) {
+  const r = (size - strokeWidth * 2) / 2;
+  const circ = 2 * Math.PI * r;
+  const progress = total > 0 ? current / total : 0;
+  const dash = circ * progress;
+  return (
+    <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#222" strokeWidth={strokeWidth} />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={strokeWidth}
+        strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+        style={{ transition: 'stroke-dasharray 0.3s linear' }} />
+    </svg>
+  );
+}
+
+// ─── SESSION EDITOR ─────────────────────────────────────────
+function SessionEditor({ session, onSave, onClose, tweaks }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  const [exercises, setExercises] = useState(session.exercices.map(e => ({ ...e })));
+  const [dragging, setDragging] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+  const [editIdx, setEditIdx] = useState(null);
+
+  // inline edit state
+  const [editNom, setEditNom] = useState('');
+  const [editSeries, setEditSeries] = useState('');
+  const [editReps, setEditReps] = useState('');
+  const [editRest, setEditRest] = useState('');
+
+  function openEdit(i) {
+    const ex = exercises[i];
+    setEditNom(ex.nom);
+    setEditSeries(String(ex.series));
+    setEditReps(ex.reps);
+    setEditRest(String(ex.repos_sec));
+    setEditIdx(i);
+  }
+  function saveEdit() {
+    const updated = exercises.map((ex, i) =>
+      i === editIdx ? { ...ex, nom: editNom, series: Number(editSeries) || ex.series, reps: editReps, repos_sec: Number(editRest) || ex.repos_sec } : ex
+    );
+    setExercises(updated);
+    setEditIdx(null);
+  }
+
+  function deleteEx(i) { setExercises(ex => ex.filter((_, idx) => idx !== i)); }
+  function addEx() {
+    setExercises(ex => [...ex, { id: `custom_${Date.now()}`, nom: 'Nouvel exercice', series: 3, reps: '10', repos_sec: 90, type: 'accessoire' }]);
+  }
+
+  function handleDragStart(i) { setDragging(i); }
+  function handleDragEnter(i) { setDragOver(i); }
+  function handleDragEnd() {
+    if (dragging !== null && dragOver !== null && dragging !== dragOver) {
+      const reordered = [...exercises];
+      const [moved] = reordered.splice(dragging, 1);
+      reordered.splice(dragOver, 0, moved);
+      setExercises(reordered);
+    }
+    setDragging(null);
+    setDragOver(null);
+  }
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bgColor, zIndex: 200, display: 'flex', flexDirection: 'column' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', borderBottom: '1px solid #1E1E1E' }}>
+        <button onClick={onClose} style={{ background: '#1E1E1E', border: 'none', borderRadius: 8, padding: '8px 10px', color: textPrimary, fontSize: 16, cursor: 'pointer' }}>×</button>
+        <div style={{ flex: 1, fontSize: 16, fontWeight: 700, color: textPrimary }}>✎ {session.nom}</div>
+        <button onClick={() => onSave(exercises)} style={{ background: accentColor, border: 'none', borderRadius: 10, padding: '8px 16px', color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
+          Sauvegarder
+        </button>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ fontSize: 11, color: textMuted, marginBottom: 4 }}>Glisser-déposer pour réordonner · Tap ✎ pour modifier</div>
+
+        {exercises.map((ex, i) => (
+          <div key={ex.id}
+            draggable
+            onDragStart={() => handleDragStart(i)}
+            onDragEnter={() => handleDragEnter(i)}
+            onDragEnd={handleDragEnd}
+            onDragOver={e => e.preventDefault()}
+            style={{
+              background: dragOver === i ? accentColor + '20' : cardColor,
+              border: `1px solid ${dragOver === i ? accentColor + '50' : '#222'}`,
+              borderRadius: 14, padding: 14, transition: 'all 0.15s', opacity: dragging === i ? 0.5 : 1
+            }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ color: '#444', fontSize: 18, cursor: 'grab', lineHeight: 1 }}>⠿</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: textPrimary }}>{ex.nom}</div>
+                <div style={{ fontSize: 12, color: textMuted, marginTop: 2, fontFamily: 'DM Mono' }}>
+                  {ex.series} séries · {ex.reps} reps · repos {fmtTime(ex.repos_sec)}
+                </div>
+              </div>
+              <button onClick={() => openEdit(i)} style={{ background: '#222', border: 'none', borderRadius: 8, padding: '6px 10px', color: textMuted, cursor: 'pointer', fontSize: 14 }}>✎</button>
+              <button onClick={() => deleteEx(i)} style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: 18, padding: '0 4px' }}>×</button>
+            </div>
+          </div>
+        ))}
+
+        <button onClick={addEx} style={{
+          width: '100%', padding: '13px 0', border: `1px dashed ${accentColor}50`,
+          borderRadius: 14, background: 'transparent', color: accentColor,
+          fontFamily: 'DM Sans', fontWeight: 600, fontSize: 14, cursor: 'pointer'
+        }}>+ Ajouter un exercice</button>
+      </div>
+
+      {/* Inline edit sheet */}
+      {editIdx !== null && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'flex-end', zIndex: 300 }}>
+          <div style={{ width: '100%', background: '#1A1A1A', borderRadius: '20px 20px 0 0', padding: 24 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: textPrimary, marginBottom: 16 }}>Modifier l'exercice</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 11, color: textMuted, marginBottom: 5 }}>Nom</div>
+                <input value={editNom} onChange={e => setEditNom(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14 }} />
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: textMuted, marginBottom: 5 }}>Séries</div>
+                  <input type="number" value={editSeries} onChange={e => setEditSeries(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: textMuted, marginBottom: 5 }}>Reps</div>
+                  <input value={editReps} onChange={e => setEditReps(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: textMuted, marginBottom: 5 }}>Repos (s)</div>
+                  <input type="number" value={editRest} onChange={e => setEditRest(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
+              <button onClick={() => setEditIdx(null)} style={{ flex: 1, padding: 13, border: 'none', borderRadius: 12, background: '#2A2A2A', color: textMuted, fontFamily: 'DM Sans', cursor: 'pointer' }}>Annuler</button>
+              <button onClick={saveEdit} style={{ flex: 2, padding: 13, border: 'none', borderRadius: 12, background: accentColor, color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, cursor: 'pointer' }}>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── DASHBOARD ──────────────────────────────────────────────
+function Dashboard({ tweaks, onStartSession, onChoosePlanning, onEditSession }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  const [selectedPlanning, setSelectedPlanning] = useState(loadState('planning', tweaks.planning));
+  const planning = selectedPlanning === '5j' ? TRAINING_DATA.planning_5j : TRAINING_DATA.planning_4j;
+
+  const today = new Date();
+  const dayNames = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+  const todayName = dayNames[today.getDay()];
+  const todayWorkout = planning.find(s => s.jour === todayName);
+  const isTrainingDay = !!todayWorkout;
+  const nutrition = isTrainingDay ? TRAINING_DATA.nutrition.jour_sport : TRAINING_DATA.nutrition.jour_repos;
+
+  const [completedSessions, setCompletedSessions] = useState(() => loadState('completed_sessions', []));
+  const weekSessions = planning.filter(s => completedSessions.includes(s.id));
+
+  function switchPlanning(p) {
+    setSelectedPlanning(p);
+    saveState('planning', p);
+    onChoosePlanning(p);
+  }
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16, padding: '12px 16px 24px', background: bgColor }}>
+
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 4 }}>
+        <div>
+          <div style={{ fontSize: 12, color: textMuted, fontWeight: 500, textTransform: 'uppercase', letterSpacing: 1 }}>
+            {today.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}
+          </div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: textPrimary, marginTop: 2 }}>
+            Bonjour, {TRAINING_DATA.profil.nom} 👋
+          </div>
+        </div>
+        <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#222', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🏃</div>
+      </div>
+
+      {/* Planning switch */}
+      <div style={{ display: 'flex', background: '#1A1A1A', borderRadius: 12, padding: 4, gap: 4 }}>
+        {['5j', '4j'].map(p => (
+          <button key={p} onClick={() => switchPlanning(p)} style={{
+            flex: 1, padding: '10px 0', border: 'none', borderRadius: 9, cursor: 'pointer',
+            background: selectedPlanning === p ? accentColor : 'transparent',
+            color: selectedPlanning === p ? '#fff' : textMuted,
+            fontFamily: 'DM Sans', fontWeight: 600, fontSize: 14, transition: 'all 0.2s'
+          }}>Planning {p}</button>
+        ))}
+      </div>
+
+      {/* Today's session */}
+      <div style={{ background: todayWorkout ? accentColor + '18' : cardColor, borderRadius: 16, padding: 16, border: `1px solid ${todayWorkout ? accentColor + '40' : '#222'}` }}>
+        <div style={{ fontSize: 11, color: todayWorkout ? accentColor : textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+          {isTrainingDay ? "— Aujourd'hui —" : "— Jour de repos —"}
+        </div>
+        {todayWorkout ? (
+          <>
+            <div style={{ fontSize: 26, fontWeight: 800, color: textPrimary, lineHeight: 1.1 }}>{todayWorkout.emoji} {todayWorkout.nom}</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              {todayWorkout.groupes.map(g => (
+                <span key={g} style={{ fontSize: 11, color: textMuted, background: '#222', padding: '3px 8px', borderRadius: 20 }}>{g}</span>
+              ))}
+              <span style={{ fontSize: 11, color: accentColor, background: accentColor + '20', padding: '3px 8px', borderRadius: 20 }}>{todayWorkout.duree_min} min</span>
+            </div>
+            <button onClick={() => onStartSession(todayWorkout)} style={{
+              marginTop: 14, width: '100%', padding: '14px 0', border: 'none', borderRadius: 12,
+              background: accentColor, color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 16, cursor: 'pointer'
+            }}>Démarrer la séance →</button>
+          </>
+        ) : (
+          <div style={{ fontSize: 16, color: textMuted, lineHeight: 1.5 }}>
+            Pas de séance prévue.<br /><span style={{ color: textPrimary, fontWeight: 600 }}>Récupération active.</span>
+          </div>
+        )}
+      </div>
+
+      {/* Weekly progress */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Semaine en cours</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {planning.map(session => {
+            const done = completedSessions.includes(session.id);
+            const isToday = session.jour === todayName;
+            return (
+              <div key={session.id} onClick={() => onStartSession(session)} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  background: done ? accentColor : isToday ? accentColor + '30' : '#1E1E1E',
+                  border: isToday ? `2px solid ${accentColor}` : '2px solid transparent', fontSize: 14, transition: 'all 0.2s'
+                }}>{done ? '✓' : session.emoji}</div>
+                <div style={{ fontSize: 9, color: isToday ? accentColor : textMuted, fontWeight: isToday ? 600 : 400, textAlign: 'center' }}>
+                  {session.jour.slice(0, 3)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ flex: 1, height: 4, background: '#222', borderRadius: 4 }}>
+            <div style={{ height: '100%', width: `${(weekSessions.length / planning.length) * 100}%`, background: accentColor, borderRadius: 4, transition: 'width 0.4s' }} />
+          </div>
+          <span style={{ fontSize: 12, color: textMuted, fontWeight: 500 }}>{weekSessions.length}/{planning.length}</span>
+        </div>
+      </div>
+
+      {/* Nutrition summary */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>Objectifs du jour</div>
+          <span style={{ fontSize: 11, color: isTrainingDay ? accentColor : '#3B82F6', background: isTrainingDay ? accentColor + '20' : '#3B82F620', padding: '2px 8px', borderRadius: 20, fontWeight: 600 }}>
+            {isTrainingDay ? 'Sport' : 'Repos'}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[
+            { label: 'Kcal', value: nutrition.kcal, unit: 'kcal', color: accentColor },
+            { label: 'Prot', value: nutrition.proteines_g, unit: 'g', color: '#22C55E' },
+            { label: 'Gluc', value: nutrition.glucides_g, unit: 'g', color: '#3B82F6' },
+            { label: 'Lip', value: nutrition.lipides_g, unit: 'g', color: '#A855F7' }
+          ].map(m => (
+            <div key={m.label} style={{ flex: 1, background: '#1A1A1A', borderRadius: 10, padding: '10px 6px', textAlign: 'center' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: m.color, fontFamily: 'DM Mono' }}>{m.value}</div>
+              <div style={{ fontSize: 9, color: textMuted, marginTop: 2 }}>{m.unit}</div>
+              <div style={{ fontSize: 9, color: textMuted, fontWeight: 600, marginTop: 1 }}>{m.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Programme list */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Programme</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {planning.map(session => {
+            const done = completedSessions.includes(session.id);
+            const isToday = session.jour === todayName;
+            return (
+              <div key={session.id} style={{
+                display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
+                background: isToday ? accentColor + '18' : '#1A1A1A',
+                border: `1px solid ${isToday ? accentColor + '40' : 'transparent'}`
+              }}>
+                <div onClick={() => onStartSession(session)} style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, cursor: 'pointer' }}>
+                  <div style={{ fontSize: 20 }}>{session.emoji}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, color: textPrimary, fontSize: 14 }}>{session.nom}</div>
+                    <div style={{ fontSize: 11, color: textMuted, marginTop: 2 }}>
+                      {session.jour} · {session.duree_min} min{session.optionnel ? <span style={{ color: '#555' }}> · optionnel</span> : null}
+                    </div>
+                  </div>
+                  {done ? (
+                    <div style={{ width: 24, height: 24, borderRadius: '50%', background: '#22C55E', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>✓</div>
+                  ) : (
+                    <div style={{ fontSize: 18, color: '#333' }}>›</div>
+                  )}
+                </div>
+                <button onClick={() => onEditSession(session)} style={{ background: '#2A2A2A', border: 'none', borderRadius: 8, padding: '6px 10px', color: textMuted, fontSize: 14, cursor: 'pointer', flexShrink: 0 }}>✎</button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SESSION SCREEN ──────────────────────────────────────────
+function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  const [exerciceIdx, setExerciceIdx] = useState(0);
+  const [serieIdx, setSerieIdx] = useState(0);
+  const [completedSeries, setCompletedSeries] = useState({});
+  const [exerciseLoads, setExerciseLoads] = useState({}); // { exerciseId: { serieIdx: load } }
+
+  const [timerActive, setTimerActive] = useState(false);
+  const [timerLeft, setTimerLeft] = useState(0);
+  const [timerTotal, setTimerTotal] = useState(0);
+  const [editingRest, setEditingRest] = useState(false);
+  const [customRest, setCustomRest] = useState(null);
+  const intervalRef = useRef(null);
+
+  const exercices = session.exercices;
+  const current = exercices[exerciceIdx];
+  const totalSeries = current?.series || 1;
+  const currentRest = customRest !== null ? customRest : (current?.repos_sec || 60);
+
+  let totalSets = exercices.reduce((s, e) => s + e.series, 0);
+  let doneSets = Object.values(completedSeries).flat().length;
+  let progress = totalSets > 0 ? doneSets / totalSets : 0;
+
+  useEffect(() => {
+    if (timerActive && timerLeft > 0) {
+      intervalRef.current = setInterval(() => {
+        setTimerLeft(t => {
+          if (t <= 1) {
+            clearInterval(intervalRef.current);
+            setTimerActive(false);
+            beep(660, 400); vibrate(500);
+            
+            // Auto-advance
+            if (serieIdx < totalSeries - 1) {
+              setSerieIdx(s => s + 1);
+            } else if (exerciceIdx < exercices.length - 1) {
+              setExerciceIdx(i => i + 1);
+              setSerieIdx(0);
+              setCustomRest(null);
+            }
+            return 0;
+          }
+
+          return t - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [timerActive, timerLeft]);
+
+
+  function startRest() {
+    clearInterval(intervalRef.current);
+    const rest = currentRest;
+    setTimerLeft(rest); setTimerTotal(rest); setTimerActive(true);
+  }
+
+  function markSerieComplete() {
+    const key = current.id;
+    const existing = completedSeries[key] || [];
+    if (existing.includes(serieIdx)) return;
+    const updated = { ...completedSeries, [key]: [...existing, serieIdx] };
+    setCompletedSeries(updated);
+    startRest();
+  }
+
+
+
+  function updateLoad(val) {
+    const key = current.id;
+    setExerciseLoads(prev => ({
+      ...prev,
+      [key]: { ...(prev[key] || {}), [serieIdx]: val }
+    }));
+  }
+
+
+  const allDone = exerciceIdx === exercices.length - 1 && (completedSeries[current?.id] || []).length >= totalSeries && !timerActive;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', background: bgColor, height: '100%', overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid #1A1A1A' }}>
+        <button onClick={onBack} style={{ background: '#1E1E1E', border: 'none', borderRadius: 8, padding: '8px 10px', color: textPrimary, fontSize: 16, cursor: 'pointer' }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, color: textMuted }}>{session.emoji} {session.nom}</div>
+          <div style={{ fontSize: 11, color: textMuted, marginTop: 1 }}>Exercice {exerciceIdx + 1}/{exercices.length}</div>
+        </div>
+        <div style={{ fontSize: 11, color: accentColor, fontWeight: 600, background: accentColor + '20', padding: '4px 10px', borderRadius: 20 }}>{Math.round(progress * 100)}%</div>
+      </div>
+      <div style={{ height: 3, background: '#1A1A1A' }}>
+        <div style={{ height: '100%', width: `${progress * 100}%`, background: accentColor, transition: 'width 0.4s' }} />
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '20px 16px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {/* Exercise title */}
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 11, color: textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8, fontWeight: 600 }}>
+            {current?.type === 'principal' ? '— PRINCIPAL —' : current?.type === 'accessoire' ? '— ACCESSOIRE —' : current?.type === 'gainage' ? '— GAINAGE —' : '— CARDIO —'}
+          </div>
+          <div style={{ fontSize: 26, fontWeight: 800, color: textPrimary, lineHeight: 1.2, marginBottom: 16 }}>{current?.nom}</div>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+            <div style={{ background: cardColor, borderRadius: 14, padding: '14px 20px', textAlign: 'center', minWidth: 80 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: accentColor, fontFamily: 'DM Mono' }}>{serieIdx + 1}<span style={{ fontSize: 16, color: textMuted }}>/{totalSeries}</span></div>
+              <div style={{ fontSize: 11, color: textMuted, marginTop: 4 }}>Série</div>
+            </div>
+            <div style={{ background: cardColor, borderRadius: 14, padding: '14px 20px', textAlign: 'center', minWidth: 80 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono' }}>{current?.reps}</div>
+              <div style={{ fontSize: 11, color: textMuted, marginTop: 4 }}>Reps</div>
+            </div>
+            <div onClick={() => setEditingRest(true)} style={{ background: cardColor, borderRadius: 14, padding: '14px 20px', textAlign: 'center', minWidth: 80, cursor: 'pointer' }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono' }}>{fmtTime(currentRest)}</div>
+              <div style={{ fontSize: 11, color: textMuted, marginTop: 4 }}>Repos ✎</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Load input */}
+        <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #1E1E1E', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Charge (kg)</div>
+            <input 
+              type="number" 
+              value={exerciseLoads[current?.id]?.[serieIdx] || ''} 
+              onChange={e => updateLoad(e.target.value)}
+              placeholder="0.0"
+              style={{ width: '100%', background: '#1A1A1A', border: '1px solid #333', borderRadius: 10, padding: '10px 14px', color: textPrimary, fontSize: 18, fontWeight: 700, fontFamily: 'DM Mono' }}
+            />
+          </div>
+          <div style={{ fontSize: 24 }}>⚖️</div>
+        </div>
+
+
+        {/* Timer */}
+        {(timerActive || timerLeft > 0) && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <div style={{ position: 'relative', width: 160, height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <CircularTimer total={timerTotal} current={timerLeft} color={accentColor} size={160} strokeWidth={8} />
+              <div style={{ position: 'absolute', textAlign: 'center' }}>
+                <div style={{ fontSize: 36, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono', lineHeight: 1 }}>{fmtTime(timerLeft)}</div>
+                <div style={{ fontSize: 11, color: textMuted, marginTop: 4 }}>REPOS</div>
+              </div>
+            </div>
+            <button onClick={() => { clearInterval(intervalRef.current); setTimerActive(false); setTimerLeft(0); }} style={{ background: 'transparent', border: '1px solid #333', borderRadius: 10, color: textMuted, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>Passer →</button>
+            <button onClick={() => { setTimerLeft(t => t + 30); setTimerTotal(t => t + 30); }} style={{ background: accentColor + '20', border: `1px solid ${accentColor}40`, borderRadius: 10, color: accentColor, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>+30 sec</button>
+
+          </div>
+        )}
+
+        {/* Series checklist */}
+        <div style={{ background: cardColor, borderRadius: 16, padding: 14, border: '1px solid #1E1E1E' }}>
+          <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Séries</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {Array.from({ length: totalSeries }).map((_, i) => {
+              const done = (completedSeries[current?.id] || []).includes(i);
+              const active = i === serieIdx && !timerActive;
+              return (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 10,
+                  background: active ? accentColor + '20' : '#1A1A1A',
+                  border: `1px solid ${active ? accentColor + '40' : 'transparent'}`, opacity: done ? 0.5 : 1
+                }}>
+                  <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2px solid ${done ? '#22C55E' : active ? accentColor : '#333'}`, background: done ? '#22C55E' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: done ? '#fff' : 'transparent' }}>✓</div>
+                  <div style={{ flex: 1, fontSize: 14, color: done ? textMuted : textPrimary, fontWeight: active ? 600 : 400 }}>Série {i + 1} — {current?.reps} reps</div>
+                  {active && !done && <span style={{ fontSize: 11, color: accentColor, fontWeight: 600 }}>EN COURS</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Exercise nav */}
+        <div style={{ background: cardColor, borderRadius: 16, padding: 14, border: '1px solid #1E1E1E' }}>
+          <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>Exercices</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {exercices.map((ex, i) => {
+              const done = (completedSeries[ex.id] || []).length >= ex.series;
+              const active = i === exerciceIdx;
+              return (
+                <div key={ex.id} onClick={() => { setExerciceIdx(i); setSerieIdx(0); setCustomRest(null); setTimerActive(false); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, background: active ? accentColor + '20' : 'transparent', cursor: 'pointer' }}>
+                  <div style={{ width: 20, height: 20, borderRadius: '50%', flexShrink: 0, background: done ? '#22C55E' : active ? accentColor : '#2A2A2A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#fff', fontWeight: 700 }}>{done ? '✓' : i + 1}</div>
+                  <div style={{ flex: 1, fontSize: 13, color: done ? textMuted : textPrimary, fontWeight: active ? 600 : 400 }}>{ex.nom}</div>
+                  <div style={{ fontSize: 11, color: textMuted }}>{ex.series}×{ex.reps}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* CTA */}
+      <div style={{ padding: '12px 16px', borderTop: '1px solid #1A1A1A' }}>
+        {allDone && session.finisher ? (
+          <button onClick={() => onFinisher(session.finisher)} style={{ width: '100%', padding: '16px 0', border: 'none', borderRadius: 14, background: `linear-gradient(135deg, ${accentColor}, #EF4444)`, color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: 'pointer' }}>🔥 Finisher {session.finisher.label} →</button>
+        ) : allDone ? (
+          <button onClick={() => onComplete(session, exerciseLoads)} style={{ width: '100%', padding: '16px 0', border: 'none', borderRadius: 14, background: '#22C55E', color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: 'pointer' }}>✓ Séance terminée !</button>
+        ) : (
+
+          <button onClick={markSerieComplete} disabled={timerActive} style={{ width: '100%', padding: '16px 0', border: 'none', borderRadius: 14, background: timerActive ? '#1E1E1E' : accentColor, color: timerActive ? textMuted : '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: timerActive ? 'default' : 'pointer', transition: 'all 0.2s' }}>
+            {timerActive ? 'Récupération...' : 'Série terminée ✓'}
+          </button>
+        )}
+      </div>
+
+      {/* Rest edit sheet */}
+      {editingRest && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'flex-end', zIndex: 100 }}>
+          <div style={{ width: '100%', background: '#1A1A1A', borderRadius: '20px 20px 0 0', padding: 24 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: textPrimary, marginBottom: 16 }}>Modifier le temps de repos</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {[30, 45, 60, 90, 120, 150, 180, 240].map(s => (
+                <button key={s} onClick={() => { setCustomRest(s); setEditingRest(false); }} style={{ padding: '10px 16px', borderRadius: 10, border: `1px solid ${s === currentRest ? accentColor : '#333'}`, background: s === currentRest ? accentColor + '30' : '#222', color: s === currentRest ? accentColor : textPrimary, fontFamily: 'DM Mono', fontSize: 14, cursor: 'pointer' }}>{fmtTime(s)}</button>
+              ))}
+            </div>
+            <button onClick={() => setEditingRest(false)} style={{ marginTop: 16, width: '100%', padding: 12, border: 'none', borderRadius: 10, background: '#333', color: textMuted, fontFamily: 'DM Sans', cursor: 'pointer' }}>Annuler</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── FINISHER ────────────────────────────────────────────────
+function FinisherScreen({ finisher, tweaks, onBack, onDone }) {
+  const { accentColor, bgColor, textPrimary, textMuted } = tweaks;
+  const totalSecs = (finisher.duree_min || 10) * 60;
+  const [timeLeft, setTimeLeft] = useState(totalSecs);
+  const [running, setRunning] = useState(false);
+  const [tours, setTours] = useState(0);
+  const [hiitRound, setHiitRound] = useState(0);
+  const [hiitPhase, setHiitPhase] = useState('effort');
+  const [hiitTimeLeft, setHiitTimeLeft] = useState(finisher.effort_sec || 20);
+  const intervalRef = useRef(null);
+  const hiitPhaseRef = useRef(hiitPhase);
+  useEffect(() => { hiitPhaseRef.current = hiitPhase; }, [hiitPhase]);
+
+  const isHIIT = finisher.type === 'hiit';
+  const isAMRAP = finisher.type === 'amrap';
+  const totalHiitRounds = finisher.rounds || 8;
+  const effortSec = finisher.effort_sec || 20;
+  const reposSec = finisher.repos_sec || 40;
+
+  useEffect(() => {
+    if (!running) { clearInterval(intervalRef.current); return; }
+    if (isHIIT) {
+      intervalRef.current = setInterval(() => {
+        setHiitTimeLeft(t => {
+          if (t <= 1) {
+            const nextPhase = hiitPhaseRef.current === 'effort' ? 'repos' : 'effort';
+            setHiitPhase(nextPhase);
+            beep(nextPhase === 'effort' ? 880 : 440, 300); vibrate(300);
+            if (nextPhase === 'effort') {
+              setHiitRound(r => {
+                if (r + 1 >= totalHiitRounds) { setRunning(false); beep(1000, 1000); return r; }
+                return r + 1;
+              });
+              return effortSec;
+            }
+            return reposSec;
+          }
+          return t - 1;
+        });
+      }, 1000);
+    } else {
+      intervalRef.current = setInterval(() => {
+        setTimeLeft(t => {
+          if (t <= 1) {
+            clearInterval(intervalRef.current);
+            setRunning(false);
+            beep(660, 600); vibrate(600);
+            return 0;
+          }
+          return t - 1;
+        });
+      }, 1000);
+    }
+
+    return () => clearInterval(intervalRef.current);
+  }, [running, isHIIT]);
+
+  const hiitColor = hiitPhase === 'effort' ? accentColor : '#3B82F6';
+  const progressColor = isHIIT ? hiitColor : accentColor;
+  const displayTime = isHIIT ? hiitTimeLeft : timeLeft;
+  const displayTotal = isHIIT ? (hiitPhase === 'effort' ? effortSec : reposSec) : totalSecs;
+  const finished = isHIIT ? (hiitRound >= totalHiitRounds - 1 && !running && hiitPhase === 'effort') : timeLeft === 0;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', background: bgColor, height: '100%' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid #1A1A1A' }}>
+        <button onClick={onBack} style={{ background: '#1E1E1E', border: 'none', borderRadius: 8, padding: '8px 10px', color: textPrimary, fontSize: 16, cursor: 'pointer' }}>←</button>
+        <div><div style={{ fontSize: 18, fontWeight: 800, color: textPrimary }}>🔥 Finisher</div><div style={{ fontSize: 11, color: textMuted }}>{finisher.label}</div></div>
+      </div>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24, padding: 24 }}>
+        <div style={{ textAlign: 'center', fontSize: 16, fontWeight: 600, color: textMuted, lineHeight: 1.5 }}>{finisher.description}</div>
+        {isHIIT && (
+          <div style={{ padding: '10px 32px', borderRadius: 999, fontSize: 22, fontWeight: 800, background: hiitColor + '25', color: hiitColor, letterSpacing: 1, transition: 'all 0.3s' }}>
+            {hiitPhase === 'effort' ? '⚡ EFFORT' : '💧 REPOS'}
+          </div>
+        )}
+        <div style={{ position: 'relative', width: 220, height: 220, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <CircularTimer total={displayTotal} current={displayTime} color={progressColor} size={220} strokeWidth={12} />
+          <div style={{ position: 'absolute', textAlign: 'center' }}>
+            <div style={{ fontSize: 52, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono', lineHeight: 1 }}>{fmtTime(displayTime)}</div>
+            {isHIIT && <div style={{ fontSize: 13, color: textMuted, marginTop: 6 }}>Round {hiitRound + 1}/{totalHiitRounds}</div>}
+            {isAMRAP && <div style={{ fontSize: 13, color: textMuted, marginTop: 6 }}>AMRAP</div>}
+          </div>
+        </div>
+        {isHIIT && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            {Array.from({ length: totalHiitRounds }).map((_, i) => (
+              <div key={i} style={{ width: 10, height: 10, borderRadius: '50%', background: i < hiitRound ? '#22C55E' : i === hiitRound ? hiitColor : '#222', transition: 'all 0.3s' }} />
+            ))}
+          </div>
+        )}
+        {isAMRAP && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+            <button onClick={() => setTours(t => Math.max(0, t - 1))} style={{ width: 52, height: 52, borderRadius: '50%', border: 'none', background: '#222', color: textPrimary, fontSize: 22, cursor: 'pointer' }}>−</button>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 52, fontWeight: 800, color: accentColor, fontFamily: 'DM Mono', lineHeight: 1 }}>{tours}</div>
+              <div style={{ fontSize: 12, color: textMuted }}>tours</div>
+            </div>
+            <button onClick={() => setTours(t => t + 1)} style={{ width: 52, height: 52, borderRadius: '50%', border: 'none', background: accentColor, color: '#fff', fontSize: 22, cursor: 'pointer' }}>+</button>
+          </div>
+        )}
+        <button onClick={() => setRunning(r => !r)} style={{ padding: '14px 40px', border: 'none', borderRadius: 14, background: running ? '#222' : accentColor, color: running ? textPrimary : '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: 'pointer', minWidth: 140 }}>
+          {running ? '⏸ Pause' : '▶ Start'}
+        </button>
+        {finished && (
+          <button onClick={onDone} style={{ padding: '14px 40px', border: 'none', borderRadius: 14, background: '#22C55E', color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: 'pointer' }}>✓ Terminé !</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── NUTRITION ───────────────────────────────────────────────
+function NutritionScreen({ tweaks, isTrainingDay: initIsTraining }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  const [isTrainingDay, setIsTrainingDay] = useState(initIsTraining);
+  const targets = isTrainingDay ? TRAINING_DATA.nutrition.jour_sport : TRAINING_DATA.nutrition.jour_repos;
+
+  // Daily reset: if stored date != today, clear entries & water
+  const [entries, setEntries] = useState(() => {
+    const stored = loadState('nutrition_entries', null);
+    const storedDate = loadState('nutrition_date', null);
+    if (stored && storedDate === todayKey()) return stored;
+    saveState('nutrition_date', todayKey());
+    return [];
+  });
+  const [water, setWater] = useState(() => {
+    const storedDate = loadState('nutrition_date', null);
+    if (storedDate === todayKey()) return loadState('water_ml', 0);
+    return 0;
+  });
+  const [showAdd, setShowAdd] = useState(false);
+  const [addMeal, setAddMeal] = useState('Déjeuner');
+  const [addKcal, setAddKcal] = useState('');
+  const [addProt, setAddProt] = useState('');
+  const [addGluc, setAddGluc] = useState('');
+  const [addLip, setAddLip] = useState('');
+  const [addLabel, setAddLabel] = useState('');
+
+  const meals = ['Petit-déjeuner', 'Collation matin', 'Déjeuner', 'Collation après-midi', 'Dîner', 'Collation soir'];
+
+  useEffect(() => { saveState('nutrition_entries', entries); saveState('nutrition_date', todayKey()); }, [entries]);
+  useEffect(() => { saveState('water_ml', water); }, [water]);
+
+  const totals = entries.reduce((acc, e) => ({ kcal: acc.kcal + (Number(e.kcal) || 0), prot: acc.prot + (Number(e.prot) || 0), gluc: acc.gluc + (Number(e.gluc) || 0), lip: acc.lip + (Number(e.lip) || 0) }), { kcal: 0, prot: 0, gluc: 0, lip: 0 });
+
+  // Update history whenever totals change
+  useEffect(() => {
+    const history = loadState('nutrition_history', {});
+    history[todayKey()] = { ...totals, water, targetKcal: targets.kcal };
+    saveState('nutrition_history', history);
+  }, [totals, water, targets.kcal]);
+
+  const historyData = (() => {
+    const history = loadState('nutrition_history', {});
+    const last7 = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const k = d.toISOString().slice(0, 10);
+      if (history[k]) last7.push({ date: k, ...history[k] });
+    }
+    return last7;
+  })();
+
+  const avgKcal = historyData.length ? Math.round(historyData.reduce((s, d) => s + d.kcal, 0) / historyData.length) : 0;
+  const goalsReached = historyData.filter(d => d.kcal >= d.targetKcal * 0.9 && d.kcal <= d.targetKcal * 1.1).length;
+
+
+  function addEntry() {
+    if (!addKcal && !addProt) return;
+    setEntries(e => [...e, { id: Date.now(), meal: addMeal, label: addLabel || addMeal, kcal: Number(addKcal) || 0, prot: Number(addProt) || 0, gluc: Number(addGluc) || 0, lip: Number(addLip) || 0 }]);
+    setAddKcal(''); setAddProt(''); setAddGluc(''); setAddLip(''); setAddLabel(''); setShowAdd(false);
+  }
+
+  function MacroBar({ label, current, target, color }) {
+    const pct = target > 0 ? current / target : 0;
+    const over = current > target;
+    const near = pct >= 0.9;
+    const barColor = over ? '#EF4444' : near ? '#F59E0B' : color;
+    return (
+      <div style={{ flex: 1 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <span style={{ fontSize: 11, color: textMuted, fontWeight: 600 }}>{label}</span>
+          <span style={{ fontSize: 11, color: barColor, fontFamily: 'DM Mono', fontWeight: 600 }}>{current}<span style={{ color: textMuted }}>/{target}</span></span>
+        </div>
+        <div style={{ height: 6, background: '#222', borderRadius: 6 }}>
+          <div style={{ height: '100%', width: `${Math.min(pct * 100, 100)}%`, background: barColor, borderRadius: 6, transition: 'width 0.4s' }} />
+        </div>
+        <div style={{ fontSize: 10, color: barColor, marginTop: 4, textAlign: 'right', fontWeight: 600 }}>{Math.round(pct * 100)}%</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16, padding: '12px 16px 24px', background: bgColor }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 4 }}>
+        <div style={{ fontSize: 20, fontWeight: 800, color: textPrimary }}>Nutrition</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {[true, false].map(training => (
+            <button key={String(training)} onClick={() => setIsTrainingDay(training)} style={{ padding: '6px 12px', border: 'none', borderRadius: 20, background: isTrainingDay === training ? accentColor : '#1E1E1E', color: isTrainingDay === training ? '#fff' : textMuted, fontFamily: 'DM Sans', fontWeight: 600, fontSize: 11, cursor: 'pointer' }}>
+              {training ? 'Sport' : 'Repos'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Objectifs</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <MacroBar label="Calories (kcal)" current={totals.kcal} target={targets.kcal} color={accentColor} />
+          <MacroBar label="Protéines (g)" current={totals.prot} target={targets.proteines_g} color="#22C55E" />
+          <MacroBar label="Glucides (g)" current={totals.gluc} target={targets.glucides_g} color="#3B82F6" />
+          <MacroBar label="Lipides (g)" current={totals.lip} target={targets.lipides_g} color="#A855F7" />
+        </div>
+      </div>
+
+      {/* Water */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>💧 Eau</div>
+          <span style={{ fontSize: 14, fontFamily: 'DM Mono', fontWeight: 700, color: '#3B82F6' }}>{(water / 1000).toFixed(2)} / 3.00 L</span>
+        </div>
+        <div style={{ height: 8, background: '#222', borderRadius: 8, marginBottom: 12 }}>
+          <div style={{ height: '100%', width: `${Math.min(water / 3000 * 100, 100)}%`, background: '#3B82F6', borderRadius: 8, transition: 'width 0.3s' }} />
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setWater(w => Math.max(0, w - 250))} style={{ flex: 1, padding: '10px 0', border: '1px solid #333', borderRadius: 10, background: 'transparent', color: textMuted, fontFamily: 'DM Sans', fontWeight: 600, cursor: 'pointer' }}>−250 ml</button>
+          <button onClick={() => setWater(w => w + 250)} style={{ flex: 1, padding: '10px 0', border: 'none', borderRadius: 10, background: '#3B82F620', color: '#3B82F6', fontFamily: 'DM Sans', fontWeight: 600, cursor: 'pointer' }}>+250 ml</button>
+          <button onClick={() => setWater(w => w + 500)} style={{ flex: 1, padding: '10px 0', border: 'none', borderRadius: 10, background: '#3B82F640', color: '#3B82F6', fontFamily: 'DM Sans', fontWeight: 700, cursor: 'pointer' }}>+500 ml</button>
+        </div>
+      </div>
+
+      <button onClick={() => setShowAdd(true)} style={{ width: '100%', padding: '14px 0', border: `1px dashed ${accentColor}60`, borderRadius: 14, background: accentColor + '10', color: accentColor, fontFamily: 'DM Sans', fontWeight: 600, fontSize: 15, cursor: 'pointer' }}>
+        + Ajouter un aliment / repas
+      </button>
+
+      {/* 7-day Summary */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Moyenne (7 jours)</div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono' }}>{avgKcal} <span style={{ fontSize: 14, color: textMuted }}>kcal</span></div>
+            <div style={{ fontSize: 11, color: textMuted, marginTop: 2 }}>consommation moyenne</div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#22C55E', fontFamily: 'DM Mono' }}>{goalsReached}/7</div>
+            <div style={{ fontSize: 11, color: textMuted, marginTop: 2 }}>objectifs atteints</div>
+          </div>
+        </div>
+      </div>
+
+
+      {meals.map(meal => {
+        const mealEntries = entries.filter(e => e.meal === meal);
+        if (!mealEntries.length) return null;
+        const mealKcal = mealEntries.reduce((s, e) => s + e.kcal, 0);
+        return (
+          <div key={meal} style={{ background: cardColor, borderRadius: 16, padding: 14, border: '1px solid #222' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: textPrimary }}>{meal}</div>
+              <div style={{ fontSize: 12, color: accentColor, fontFamily: 'DM Mono' }}>{mealKcal} kcal</div>
+            </div>
+            {mealEntries.map(e => (
+              <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderTop: '1px solid #1A1A1A' }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, color: textPrimary }}>{e.label}</div>
+                  <div style={{ fontSize: 11, color: textMuted, marginTop: 2, fontFamily: 'DM Mono' }}>{e.kcal}kcal · {e.prot}g P · {e.gluc}g G · {e.lip}g L</div>
+                </div>
+                <button onClick={() => setEntries(en => en.filter(x => x.id !== e.id))} style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: 18 }}>×</button>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+
+      {/* Add modal */}
+      {showAdd && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)', display: 'flex', alignItems: 'flex-end', zIndex: 100 }}>
+          <div style={{ width: '100%', maxWidth: 430, margin: '0 auto', background: '#1A1A1A', borderRadius: '20px 20px 0 0', padding: 24 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: textPrimary, marginBottom: 16 }}>Ajouter un aliment</div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: textMuted, marginBottom: 6 }}>Repas</div>
+              <select value={addMeal} onChange={e => setAddMeal(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14 }}>
+                {meals.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: textMuted, marginBottom: 6 }}>Description (optionnel)</div>
+              <input value={addLabel} onChange={e => setAddLabel(e.target.value)} placeholder="ex : Poulet + riz" style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14 }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              {[{ label: 'Calories', val: addKcal, set: setAddKcal, ph: 'kcal' }, { label: 'Protéines', val: addProt, set: setAddProt, ph: 'g' }].map(f => (
+                <div key={f.label} style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: textMuted, marginBottom: 6 }}>{f.label}</div>
+                  <input type="number" value={f.val} onChange={e => f.set(e.target.value)} placeholder={f.ph} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+              {[{ label: 'Glucides', val: addGluc, set: setAddGluc }, { label: 'Lipides', val: addLip, set: setAddLip }].map(f => (
+                <div key={f.label} style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: textMuted, marginBottom: 6 }}>{f.label} (g)</div>
+                  <input type="number" value={f.val} onChange={e => f.set(e.target.value)} placeholder="g" style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#222', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={() => setShowAdd(false)} style={{ flex: 1, padding: 13, border: 'none', borderRadius: 12, background: '#2A2A2A', color: textMuted, fontFamily: 'DM Sans', cursor: 'pointer' }}>Annuler</button>
+              <button onClick={addEntry} style={{ flex: 2, padding: 13, border: 'none', borderRadius: 12, background: accentColor, color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, cursor: 'pointer' }}>Ajouter</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── HISTORY ─────────────────────────────────────────────────
+function HistoryScreen({ tweaks }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  const [weightLog, setWeightLog] = useState(() => loadState('weight_log', [
+    { date: '2026-04-01', weight: 122.5 }, { date: '2026-04-08', weight: 121.8 },
+    { date: '2026-04-15', weight: 121.2 }, { date: '2026-04-22', weight: 120.5 },
+    { date: '2026-04-29', weight: 119.9 }, { date: '2026-05-04', weight: 119.3 }
+  ]));
+  const [sessionLog, setSessionLog] = useState(() => loadState('session_log', [
+    { date: '2026-04-28', session: 'Force Poussé', duration: 65 },
+    { date: '2026-04-29', session: 'Force Tiré', duration: 62 },
+    { date: '2026-04-30', session: 'Mental & Mobilité', duration: 55 },
+    { date: '2026-05-01', session: 'Force Jambes', duration: 70 },
+    { date: '2026-05-02', session: 'Full Body Métabo', duration: 58 },
+    { date: '2026-05-04', session: 'Force Poussé', duration: 67 }
+  ]));
+  const [selectedExChart, setSelectedExChart] = useState(null);
+  const [newWeight, setNewWeight] = useState('');
+
+
+  function addWeight() {
+    if (!newWeight) return;
+    const entry = { date: new Date().toISOString().slice(0, 10), weight: parseFloat(newWeight) };
+    const updated = [...weightLog, entry];
+    setWeightLog(updated); saveState('weight_log', updated); setNewWeight('');
+  }
+  function deleteSession(i) {
+    const reversed = [...sessionLog].reverse();
+    const globalIdx = sessionLog.length - 1 - i;
+    const updated = sessionLog.filter((_, idx) => idx !== globalIdx);
+    setSessionLog(updated); saveState('session_log', updated);
+  }
+
+  const startWeight = TRAINING_DATA.profil.poids_kg;
+  const currentWeight = weightLog.length > 0 ? weightLog[weightLog.length - 1].weight : startWeight;
+  const lost = startWeight - currentWeight; // positive = good, negative = gained
+  const lostColor = lost >= 0 ? '#22C55E' : '#EF4444';
+  const progress = Math.max(0, Math.min(lost / 20 * 100, 100));
+
+  function Sparkline({ data, color }) {
+    if (data.length < 2) return null;
+    const vals = data.map(d => d.weight);
+    const min = Math.min(...vals) - 0.5, max = Math.max(...vals) + 0.5;
+    const W = 280, H = 80;
+    const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * W},${H - ((v - min) / (max - min)) * H}`);
+    return (
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }}>
+        <defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={color} stopOpacity="0.3" /><stop offset="100%" stopColor={color} stopOpacity="0.02" /></linearGradient></defs>
+        <path d={`M 0,${H} ${pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p}`).join(' ')} L ${W},${H} Z`} fill="url(#sg)" />
+        <polyline points={pts.join(' ')} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+        {vals.map((v, i) => {
+          const x = (i / (vals.length - 1)) * W, y = H - ((v - min) / (max - min)) * H;
+          return <circle key={i} cx={x} cy={y} r="3" fill={color} />;
+        })}
+      </svg>
+    );
+  }
+
+  function GenericSparkline({ values, color }) {
+    if (values.length < 2) return <div style={{ fontSize: 11, color: textMuted, textAlign: 'center', padding: 20 }}>Pas assez de données</div>;
+    const min = Math.min(...values) * 0.9, max = Math.max(...values) * 1.1;
+    const W = 280, H = 80;
+    const pts = values.map((v, i) => `${(i / (values.length - 1)) * W},${H - ((v - min) / (max - min)) * H}`);
+    return (
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }}>
+        <polyline points={pts.join(' ')} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+        {values.map((v, i) => {
+          const x = (i / (values.length - 1)) * W, y = H - ((v - min) / (max - min)) * H;
+          return <circle key={i} cx={x} cy={y} r="3" fill={color} />;
+        })}
+      </svg>
+    );
+  }
+
+  // Extract exercise list from log
+  const exerciseList = [];
+  sessionLog.forEach(s => {
+    if (s.loads) {
+      Object.keys(s.loads).forEach(exId => {
+        if (!exerciseList.includes(exId)) exerciseList.push(exId);
+      });
+    }
+  });
+
+  const chartData = selectedExChart ? sessionLog.filter(s => s.loads && s.loads[selectedExChart]).map(s => {
+    const loads = Object.values(s.loads[selectedExChart]).map(Number);
+    return Math.max(...loads); // show max load per session
+  }) : [];
+
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16, padding: '12px 16px 24px', background: bgColor }}>
+      <div style={{ fontSize: 20, fontWeight: 800, color: textPrimary, paddingTop: 4 }}>Historique</div>
+
+      {/* Recomp progress */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Recomposition corporelle</div>
+        <div style={{ display: 'flex', gap: 16, marginBottom: 14 }}>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 800, color: textPrimary, fontFamily: 'DM Mono' }}>{currentWeight.toFixed(1)}</div>
+            <div style={{ fontSize: 11, color: textMuted }}>kg actuel</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 800, color: lostColor, fontFamily: 'DM Mono' }}>{lost >= 0 ? '−' : '+'}{Math.abs(lost).toFixed(1)}</div>
+            <div style={{ fontSize: 11, color: textMuted }}>{lost >= 0 ? 'kg perdus' : 'kg pris'}</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 28, fontWeight: 800, color: accentColor, fontFamily: 'DM Mono' }}>{Math.max(0, 20 - lost).toFixed(1)}</div>
+            <div style={{ fontSize: 11, color: textMuted }}>kg restants</div>
+          </div>
+        </div>
+        <div style={{ height: 8, background: '#1A1A1A', borderRadius: 8, marginBottom: 6 }}>
+          <div style={{ height: '100%', width: `${progress}%`, background: `linear-gradient(90deg, #22C55E, ${accentColor})`, borderRadius: 8 }} />
+        </div>
+        <div style={{ fontSize: 11, color: textMuted, textAlign: 'right' }}>{progress.toFixed(0)}% de l'objectif</div>
+      </div>
+
+      {/* Weight chart */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Évolution du poids</div>
+        <div style={{ overflowX: 'auto' }}><Sparkline data={weightLog} color={accentColor} /></div>
+        <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
+          <input type="number" value={newWeight} onChange={e => setNewWeight(e.target.value)} placeholder="Nouveau poids (kg)" style={{ flex: 1, padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#1A1A1A', color: textPrimary, fontFamily: 'DM Mono', fontSize: 15 }} />
+          <button onClick={addWeight} style={{ padding: '10px 16px', border: 'none', borderRadius: 10, background: accentColor, color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, cursor: 'pointer' }}>+</button>
+        </div>
+      </div>
+
+      {/* Exercise progression */}
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Progression exercices</div>
+        <select value={selectedExChart || ''} onChange={e => setSelectedExChart(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#1A1A1A', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14, marginBottom: 14 }}>
+          <option value="">Sélectionner un exercice</option>
+          {exerciseList.map(exId => (
+            <option key={exId} value={exId}>{exId}</option>
+          ))}
+        </select>
+        {selectedExChart && (
+          <div style={{ overflowX: 'auto' }}><GenericSparkline values={chartData} color="#22C55E" /></div>
+        )}
+      </div>
+
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Séances récentes</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {[...sessionLog].reverse().slice(0, 20).map((s, i) => (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: '1px solid #1A1A1A' }}>
+              <div style={{ width: 36, height: 36, borderRadius: 10, background: accentColor + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🏋️</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{s.session}</div>
+                <div style={{ fontSize: 11, color: textMuted, marginTop: 2 }}>
+                  {new Date(s.date).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: accentColor, fontFamily: 'DM Mono', fontWeight: 600 }}>{s.duration} min</div>
+              <button onClick={() => deleteSession(i)} style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: 18, padding: '0 4px' }} title="Supprimer">×</button>
+            </div>
+          ))}
+          {sessionLog.length === 0 && <div style={{ fontSize: 13, color: textMuted, textAlign: 'center', padding: '16px 0' }}>Aucune séance enregistrée</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PROFILE ─────────────────────────────────────────────────
+function ProfileScreen({ tweaks }) {
+  const { accentColor, bgColor, cardColor, textPrimary, textMuted } = tweaks;
+  // Read latest weight from log
+  const weightLog = loadState('weight_log', []);
+  const currentWeight = weightLog.length > 0 ? weightLog[weightLog.length - 1].weight : TRAINING_DATA.profil.poids_kg;
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16, padding: '12px 16px 24px', background: bgColor }}>
+      <div style={{ fontSize: 20, fontWeight: 800, color: textPrimary, paddingTop: 4 }}>Profil</div>
+      <div style={{ background: cardColor, borderRadius: 16, padding: 20, border: '1px solid #222', textAlign: 'center' }}>
+        <div style={{ width: 72, height: 72, borderRadius: '50%', background: accentColor + '20', margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32 }}>🏃</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: textPrimary }}>{TRAINING_DATA.profil.nom}</div>
+        <div style={{ fontSize: 14, color: textMuted, marginTop: 4 }}>Recomposition corporelle · 10–12 mois</div>
+        <div style={{ display: 'flex', gap: 12, marginTop: 16, justifyContent: 'center' }}>
+          {[
+            { label: 'Âge', val: '28 ans' },
+            { label: 'Taille', val: '1,90 m' },
+            { label: 'Poids', val: `${currentWeight} kg` }
+          ].map(s => (
+            <div key={s.label} style={{ background: '#1A1A1A', borderRadius: 10, padding: '10px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: textPrimary, fontFamily: 'DM Mono' }}>{s.val}</div>
+              <div style={{ fontSize: 11, color: textMuted }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Objectif</div>
+        <div style={{ fontSize: 15, color: textPrimary, lineHeight: 1.7 }}>
+          Perte de <span style={{ color: accentColor, fontWeight: 700 }}>20 kg de graisse</span><br />
+          Prise de masse maigre<br />
+          Durée estimée : <span style={{ fontWeight: 600 }}>10–12 mois</span>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+        <button onClick={() => {
+          const data = {};
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            data[key] = loadState(key, null);
+          }
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = `training_data_${todayKey()}.json`;
+          a.click();
+        }} style={{ width: '100%', padding: '14px 0', border: 'none', borderRadius: 12, background: '#222', color: textPrimary, fontFamily: 'DM Sans', fontWeight: 600, cursor: 'pointer' }}>
+          📤 Exporter mes données (JSON)
+        </button>
+        <button onClick={onReset} style={{ width: '100%', padding: '14px 0', border: 'none', borderRadius: 12, background: '#EF444420', color: '#EF4444', fontFamily: 'DM Sans', fontWeight: 600, cursor: 'pointer' }}>
+          ⚠️ Réinitialiser l'application
+        </button>
+      </div>
+
+    </div>
+  );
+}
+
+// ─── TAB BAR ─────────────────────────────────────────────────
+function TabBar({ active, onChange, accentColor, textMuted }) {
+  const tabs = [
+    { id: 'home', label: 'Séance', icon: '🏋️' },
+    { id: 'nutrition', label: 'Nutrition', icon: '🥗' },
+    { id: 'history', label: 'Historique', icon: '📊' },
+    { id: 'profile', label: 'Profil', icon: '👤' }
+  ];
+  return (
+    <div style={{ display: 'flex', background: '#0F0F0F', borderTop: '1px solid #1E1E1E', padding: '8px 0 4px' }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => onChange(t.id)} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0' }}>
+          <span style={{ fontSize: 22 }}>{t.icon}</span>
+          <span style={{ fontSize: 10, fontWeight: 600, color: active === t.id ? accentColor : textMuted, fontFamily: 'DM Sans' }}>{t.label}</span>
+          {active === t.id && <div style={{ width: 20, height: 2, background: accentColor, borderRadius: 2 }} />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────
+function App() {
+  const { useTweaks, TweaksPanel, TweakSection, TweakColor, TweakRadio } = window;
+  const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  const { accentColor, bgColor, textPrimary, textMuted } = tweaks;
+
+  const [tab, setTab] = useState('home');
+  const [screen, setScreen] = useState('dashboard');
+  const [activeSession, setActiveSession] = useState(null);
+  const [activeFinisher, setActiveFinisher] = useState(null);
+  const [editingSession, setEditingSession] = useState(null);
+  const [planning, setPlanning] = useState(loadState('planning', tweaks.planning));
+  // Custom exercise overrides stored per session id
+  const [sessionOverrides, setSessionOverrides] = useState(() => loadState('session_overrides', {}));
+
+  const today = new Date();
+  const dayNames = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+  const todayName = dayNames[today.getDay()];
+  const currentPlanning = planning === '5j' ? TRAINING_DATA.planning_5j : TRAINING_DATA.planning_4j;
+  const isTrainingDay = currentPlanning.some(s => s.jour === todayName);
+
+  function getSession(session) {
+    const overrides = sessionOverrides[session.id];
+    if (overrides) return { ...session, exercices: overrides };
+    return session;
+  }
+
+  function startSession(session) {
+    setActiveSession(getSession(session));
+    setScreen('session');
+    setTab('home');
+  }
+  function editSession(session) {
+    setEditingSession(getSession(session));
+    setScreen('editor');
+  }
+  function saveSessionEdit(sessionId, newExercises) {
+    const updated = { ...sessionOverrides, [sessionId]: newExercises };
+    setSessionOverrides(updated);
+    saveState('session_overrides', updated);
+    setScreen('dashboard');
+    setEditingSession(null);
+  }
+  function goToFinisher(finisher) { setActiveFinisher(finisher); setScreen('finisher'); }
+  function completeSession(session, loads = {}) {
+    const prev = loadState('completed_sessions', []);
+    if (!prev.includes(session.id)) saveState('completed_sessions', [...prev, session.id]);
+    const log = loadState('session_log', []);
+    saveState('session_log', [...log, { 
+      date: new Date().toISOString().slice(0, 10), 
+      session: session.nom, 
+      duration: session.duree_min,
+      loads: loads 
+    }]);
+    setScreen('dashboard'); setActiveSession(null);
+  }
+
+  function resetToDefaults() {
+    if (confirm("Réinitialiser toutes les données aux valeurs par défaut ?")) {
+      localStorage.clear();
+      window.location.reload();
+    }
+  }
+
+
+  function renderScreen() {
+    if (screen === 'editor' && editingSession) {
+      return <SessionEditor session={editingSession} onSave={(exs) => saveSessionEdit(editingSession.id, exs)} onClose={() => setScreen('dashboard')} tweaks={tweaks} />;
+    }
+    if (screen === 'session' && activeSession) {
+      return <SessionScreen session={activeSession} tweaks={tweaks} onBack={() => setScreen('dashboard')} onFinisher={goToFinisher} onComplete={completeSession} />;
+    }
+    if (screen === 'finisher' && activeFinisher) {
+      return <FinisherScreen finisher={activeFinisher} tweaks={tweaks} onBack={() => setScreen('session')} onDone={() => completeSession(activeSession)} />;
+    }
+    if (tab === 'nutrition') return <NutritionScreen tweaks={tweaks} isTrainingDay={isTrainingDay} />;
+    if (tab === 'history') return <HistoryScreen tweaks={tweaks} />;
+    if (tab === 'profile') return <ProfileScreen tweaks={tweaks} onReset={resetToDefaults} />;
+    return <Dashboard tweaks={tweaks} onStartSession={startSession} onChoosePlanning={(p) => setPlanning(p)} onEditSession={editSession} />;
+
+  }
+
+  const showTabBar = screen === 'dashboard' || (screen !== 'session' && screen !== 'finisher' && screen !== 'editor');
+
+  return (
+    <IOSDevice dark={true}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: bgColor, fontFamily: 'DM Sans, sans-serif', paddingTop: 59 }}>
+        <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+          {renderScreen()}
+        </div>
+        {showTabBar && <TabBar active={tab} onChange={(t) => { setTab(t); setScreen('dashboard'); }} accentColor={accentColor} textMuted={textMuted} />}
+      </div>
+
+      <TweaksPanel>
+        <TweakSection title="Couleurs">
+          <TweakColor id="accentColor" label="Accent" value={tweaks.accentColor} onChange={v => setTweak('accentColor', v)} />
+          <TweakColor id="bgColor" label="Fond" value={tweaks.bgColor} onChange={v => setTweak('bgColor', v)} />
+          <TweakColor id="cardColor" label="Carte" value={tweaks.cardColor} onChange={v => setTweak('cardColor', v)} />
+        </TweakSection>
+        <TweakSection title="Planning">
+          <TweakRadio id="planning" label="Défaut" options={['5j', '4j']} value={tweaks.planning} onChange={v => { setTweak('planning', v); setPlanning(v); saveState('planning', v); }} />
+        </TweakSection>
+      </TweaksPanel>
+    </IOSDevice>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
