@@ -32,6 +32,11 @@
   ::-webkit-scrollbar { width: 0; }
   input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
   select { appearance: none; }
+  /* ─── RESPONSIVE MOBILE (vraie utilisation téléphone) ─── */
+  @media (max-width: 500px) {
+    body { align-items: flex-start; background: #0A0A0A; }
+    #root { display: block; width: 100%; min-height: 100dvh; }
+  }
 </style>
 </head>
 <body>
@@ -408,12 +413,15 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   const [editingRest, setEditingRest] = useState(false);
   const [customRest, setCustomRest] = useState(null);
   const intervalRef = useRef(null);
+  const timerDoneRef = useRef(false); // signal: timer hit 0 naturellement
 
   // Refs to hold latest values for the timer callback (avoids stale closures)
   const serieIdxRef = useRef(serieIdx);
   const exerciceIdxRef = useRef(exerciceIdx);
+  const timerActiveRef = useRef(timerActive);
   useEffect(() => { serieIdxRef.current = serieIdx; }, [serieIdx]);
   useEffect(() => { exerciceIdxRef.current = exerciceIdx; }, [exerciceIdx]);
+  useEffect(() => { timerActiveRef.current = timerActive; }, [timerActive]);
 
   const exercices = session.exercices;
   const current = exercices[exerciceIdx];
@@ -422,44 +430,79 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   useEffect(() => { totalSeriesRef.current = totalSeries; }, [totalSeries]);
   const currentRest = customRest !== null ? customRest : (current?.repos_sec || 60);
 
+  // Load history from localStorage for current exercise
+  const loadHistory = loadState('exercise_load_history', {});
+  const currentExHistory = current ? loadHistory[current.id] : null;
+
   let totalSets = exercices.reduce((s, e) => s + e.series, 0);
   let doneSets = Object.values(completedSeries).flat().length;
   let progress = totalSets > 0 ? doneSets / totalSets : 0;
 
+  // Advance to next serie or exercise
+  function advanceToNext() {
+    const curSerie = serieIdxRef.current;
+    const curExo = exerciceIdxRef.current;
+    const curTotalSeries = totalSeriesRef.current;
+    if (curSerie < curTotalSeries - 1) {
+      setSerieIdx(curSerie + 1);
+    } else if (curExo < exercices.length - 1) {
+      setExerciceIdx(curExo + 1);
+      setSerieIdx(0);
+      setCustomRest(null);
+    }
+  }
+
+  // Timer effect: only depends on timerActive, uses ref-based interval
+  // IMPORTANT: on ne fait JAMAIS setState(setState) — anti-pattern qui casse sur mobile.
+  // La progression de série se déclenche dans l'effect timerLeft ci-dessous.
   useEffect(() => {
-    if (timerActive && timerLeft > 0) {
+    if (timerActive) {
+      clearInterval(intervalRef.current);
       intervalRef.current = setInterval(() => {
         setTimerLeft(t => {
           if (t <= 1) {
             clearInterval(intervalRef.current);
-            setTimerActive(false);
-            beep(660, 400); vibrate(500);
-
-            // Auto-advance using refs for fresh values
-            const curSerie = serieIdxRef.current;
-            const curExo = exerciceIdxRef.current;
-            const curTotalSeries = totalSeriesRef.current;
-            if (curSerie < curTotalSeries - 1) {
-              setSerieIdx(curSerie + 1);
-            } else if (curExo < exercices.length - 1) {
-              setExerciceIdx(curExo + 1);
-              setSerieIdx(0);
-              setCustomRest(null);
-            }
+            intervalRef.current = null;
+            timerDoneRef.current = true; // signal pour l'effect suivant
             return 0;
           }
           return t - 1;
         });
       }, 1000);
+    } else {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
     }
-    return () => clearInterval(intervalRef.current);
-  }, [timerActive, timerLeft]);
+    return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
+  }, [timerActive]);
 
+  // Réagit quand le timer atteint 0 naturellement (hors updater setState)
+  useEffect(() => {
+    if (timerLeft === 0 && timerDoneRef.current) {
+      timerDoneRef.current = false;
+      setTimerActive(false);
+      beep(660, 400); vibrate(500);
+      advanceToNext();
+    }
+  }, [timerLeft]);
+
+  function skipRest() {
+    clearInterval(intervalRef.current);
+    intervalRef.current = null;
+    timerDoneRef.current = false; // annule tout signal pending
+    setTimerActive(false);
+    setTimerLeft(0);
+    advanceToNext();
+  }
 
   function startRest() {
     clearInterval(intervalRef.current);
+    intervalRef.current = null;
     const rest = currentRest;
-    setTimerLeft(rest); setTimerTotal(rest); setTimerActive(true);
+    setTimerLeft(rest);
+    setTimerTotal(rest);
+    // Use setTimeout to ensure state is flushed before restarting
+    setTimeout(() => setTimerActive(true), 0);
   }
 
   function markSerieComplete() {
@@ -522,6 +565,30 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
           </div>
         </div>
 
+        {/* Previous loads history */}
+        {currentExHistory && currentExHistory.length > 0 && (
+          <div style={{ background: cardColor, borderRadius: 16, padding: 14, border: '1px solid #1E1E1E' }}>
+            <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>📊 Dernières charges</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {currentExHistory.slice(-3).reverse().map((entry, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, background: i === 0 ? accentColor + '15' : '#1A1A1A', border: i === 0 ? `1px solid ${accentColor}30` : '1px solid transparent' }}>
+                  <div style={{ fontSize: 11, color: i === 0 ? accentColor : textMuted, fontWeight: 600, minWidth: 70 }}>
+                    {new Date(entry.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
+                  </div>
+                  <div style={{ flex: 1, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {Object.entries(entry.loads).map(([sIdx, load]) => (
+                      <span key={sIdx} style={{ fontSize: 12, color: textPrimary, background: '#222', padding: '2px 8px', borderRadius: 6, fontFamily: 'DM Mono', fontWeight: 600 }}>
+                        S{Number(sIdx) + 1}: {load}kg
+                      </span>
+                    ))}
+                  </div>
+                  {i === 0 && <span style={{ fontSize: 9, color: accentColor, fontWeight: 700 }}>DERNIER</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Load input */}
         <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #1E1E1E', display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ flex: 1 }}>
@@ -548,7 +615,7 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
                 <div style={{ fontSize: 11, color: textMuted, marginTop: 4 }}>REPOS</div>
               </div>
             </div>
-            <button onClick={() => { clearInterval(intervalRef.current); setTimerActive(false); setTimerLeft(0); }} style={{ background: 'transparent', border: '1px solid #333', borderRadius: 10, color: textMuted, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>Passer →</button>
+            <button onClick={skipRest} style={{ background: 'transparent', border: '1px solid #333', borderRadius: 10, color: textMuted, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>Passer →</button>
             <button onClick={() => { setTimerLeft(t => t + 30); setTimerTotal(t => t + 30); }} style={{ background: accentColor + '20', border: `1px solid ${accentColor}40`, borderRadius: 10, color: accentColor, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>+30 sec</button>
 
           </div>
@@ -1019,20 +1086,27 @@ function HistoryScreen({ tweaks }) {
     );
   }
 
-  // Extract exercise list from log
-  const exerciseList = [];
-  sessionLog.forEach(s => {
-    if (s.loads) {
-      Object.keys(s.loads).forEach(exId => {
-        if (!exerciseList.includes(exId)) exerciseList.push(exId);
-      });
-    }
-  });
+  // Map id → nom depuis TRAINING_DATA
+  const exNameMap = {};
+  [...TRAINING_DATA.planning_5j, ...TRAINING_DATA.planning_4j].forEach(s =>
+    s.exercices.forEach(e => { exNameMap[e.id] = e.nom; })
+  );
 
-  const chartData = selectedExChart ? sessionLog.filter(s => s.loads && s.loads[selectedExChart]).map(s => {
-    const loads = Object.values(s.loads[selectedExChart]).map(Number);
-    return Math.max(...loads); // show max load per session
-  }) : [];
+  // Historique des charges par exercice (sauvegardé à chaque séance terminée)
+  const exerciseLoadHistory = loadState('exercise_load_history', {});
+
+  // Exercices ayant au moins une entrée
+  const exerciseList = Object.keys(exerciseLoadHistory)
+    .filter(id => exerciseLoadHistory[id] && exerciseLoadHistory[id].length > 0)
+    .map(id => ({ id, nom: exNameMap[id] || id }))
+    .sort((a, b) => a.nom.localeCompare(b.nom));
+
+  const exHistory = selectedExChart ? (exerciseLoadHistory[selectedExChart] || []) : [];
+  const chartData = exHistory.map(entry => {
+    const loads = Object.values(entry.loads).map(Number).filter(v => v > 0);
+    return loads.length > 0 ? Math.max(...loads) : null;
+  }).filter(v => v !== null);
+  const chartDates = exHistory.map(e => e.date);
 
 
   return (
@@ -1072,38 +1146,88 @@ function HistoryScreen({ tweaks }) {
         </div>
       </div>
 
-      {/* Exercise progression */}
+      {/* Progression exercices */}
       <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
-        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>Progression exercices</div>
-        <select value={selectedExChart || ''} onChange={e => setSelectedExChart(e.target.value)} style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#1A1A1A', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14, marginBottom: 14 }}>
-          <option value="">Sélectionner un exercice</option>
-          {exerciseList.map(exId => (
-            <option key={exId} value={exId}>{exId}</option>
-          ))}
-        </select>
-        {selectedExChart && (
-          <div style={{ overflowX: 'auto' }}><GenericSparkline values={chartData} color="#22C55E" /></div>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 14 }}>📈 Progression exercices</div>
+        {exerciseList.length === 0 ? (
+          <div style={{ fontSize: 13, color: textMuted, textAlign: 'center', padding: '12px 0', lineHeight: 1.6 }}>
+            Rentre tes charges pendant les séances<br />pour voir ta courbe de progression ici 💪
+          </div>
+        ) : (
+          <>
+            <select value={selectedExChart || ''} onChange={e => setSelectedExChart(e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #333', background: '#1A1A1A', color: textPrimary, fontFamily: 'DM Sans', fontSize: 14, marginBottom: 14 }}>
+              <option value="">Sélectionner un exercice</option>
+              {exerciseList.map(ex => (
+                <option key={ex.id} value={ex.id}>{ex.nom}</option>
+              ))}
+            </select>
+            {selectedExChart && chartData.length >= 2 && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <span style={{ fontSize: 11, color: textMuted }}>Charge max par séance (kg)</span>
+                  <span style={{ fontSize: 12, fontFamily: 'DM Mono', fontWeight: 700, color: '#22C55E' }}>
+                    {chartData[chartData.length - 1]} kg
+                    {chartData[chartData.length - 1] > chartData[0] &&
+                      <span> +{(chartData[chartData.length - 1] - chartData[0]).toFixed(1)} ↑</span>}
+                  </span>
+                </div>
+                <div style={{ overflowX: 'auto' }}><GenericSparkline values={chartData} color="#22C55E" /></div>
+                {chartDates.length >= 2 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
+                    <span style={{ fontSize: 10, color: textMuted }}>{new Date(chartDates[0]).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</span>
+                    <span style={{ fontSize: 10, color: textMuted }}>{new Date(chartDates[chartDates.length - 1]).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {selectedExChart && chartData.length === 1 && (
+              <div style={{ fontSize: 12, color: textMuted, textAlign: 'center', padding: '8px 0' }}>
+                1 séance enregistrée — continue pour voir l'évolution !
+              </div>
+            )}
+            {selectedExChart && chartData.length === 0 && (
+              <div style={{ fontSize: 12, color: textMuted, textAlign: 'center', padding: '8px 0' }}>
+                Pas encore de charges saisies pour cet exercice.
+              </div>
+            )}
+          </>
         )}
       </div>
 
+      {/* Résumé séances (compact) */}
       <div style={{ background: cardColor, borderRadius: 16, padding: 16, border: '1px solid #222' }}>
-        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Séances récentes</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {[...sessionLog].reverse().slice(0, 20).map((s, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0', borderBottom: '1px solid #1A1A1A' }}>
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: accentColor + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>🏋️</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{s.session}</div>
-                <div style={{ fontSize: 11, color: textMuted, marginTop: 2 }}>
-                  {new Date(s.date).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' })}
-                </div>
-              </div>
-              <div style={{ fontSize: 12, color: accentColor, fontFamily: 'DM Mono', fontWeight: 600 }}>{s.duration} min</div>
-              <button onClick={() => deleteSession(i)} style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: 18, padding: '0 4px' }} title="Supprimer">×</button>
+        <div style={{ fontSize: 12, color: textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>🗓 Résumé séances</div>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+          {[
+            { label: 'Total', val: sessionLog.length, color: accentColor },
+            { label: 'Cette semaine', val: (() => { const mon = new Date(); mon.setDate(mon.getDate() - mon.getDay() + 1); return sessionLog.filter(s => new Date(s.date) >= mon).length; })(), color: '#22C55E' },
+            { label: 'Exercices suivis', val: exerciseList.length, color: '#3B82F6' }
+          ].map(s => (
+            <div key={s.label} style={{ flex: 1, background: '#1A1A1A', borderRadius: 10, padding: '10px 6px', textAlign: 'center' }}>
+              <div style={{ fontSize: 22, fontWeight: 800, color: s.color, fontFamily: 'DM Mono' }}>{s.val}</div>
+              <div style={{ fontSize: 9, color: textMuted, marginTop: 2, lineHeight: 1.3 }}>{s.label}</div>
             </div>
           ))}
-          {sessionLog.length === 0 && <div style={{ fontSize: 13, color: textMuted, textAlign: 'center', padding: '16px 0' }}>Aucune séance enregistrée</div>}
         </div>
+        {sessionLog.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, marginBottom: 4 }}>Dernières séances</div>
+            {[...sessionLog].reverse().slice(0, 5).map((s, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 8, background: '#1A1A1A' }}>
+                <div style={{ fontSize: 16 }}>🏋️</div>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{s.session}</span>
+                  <span style={{ fontSize: 11, color: textMuted, marginLeft: 8 }}>
+                    {new Date(s.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
+                  </span>
+                </div>
+                <span style={{ fontSize: 11, color: accentColor, fontFamily: 'DM Mono', fontWeight: 600 }}>{s.duration} min</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {sessionLog.length === 0 && <div style={{ fontSize: 13, color: textMuted, textAlign: 'center', padding: '8px 0' }}>Aucune séance enregistrée</div>}
       </div>
     </div>
   );
@@ -1259,12 +1383,30 @@ function App() {
     const prev = loadState('completed_sessions', []);
     if (!prev.includes(session.id)) saveState('completed_sessions', [...prev, session.id]);
     const log = loadState('session_log', []);
+    const today = new Date().toISOString().slice(0, 10);
     saveState('session_log', [...log, { 
-      date: new Date().toISOString().slice(0, 10), 
+      date: today, 
       session: session.nom, 
       duration: session.duree_min,
       loads: loads 
     }]);
+
+    // Save load history per exercise for progression tracking
+    const loadHistory = loadState('exercise_load_history', {});
+    if (loads && typeof loads === 'object') {
+      Object.entries(loads).forEach(([exId, seriesLoads]) => {
+        // Only save if there are actual load values
+        const hasValues = Object.values(seriesLoads).some(v => v && Number(v) > 0);
+        if (hasValues) {
+          if (!loadHistory[exId]) loadHistory[exId] = [];
+          loadHistory[exId].push({ date: today, loads: seriesLoads });
+          // Keep only last 10 entries per exercise
+          if (loadHistory[exId].length > 10) loadHistory[exId] = loadHistory[exId].slice(-10);
+        }
+      });
+      saveState('exercise_load_history', loadHistory);
+    }
+
     setScreen('dashboard'); setActiveSession(null);
   }
 
@@ -1295,25 +1437,45 @@ function App() {
 
   const showTabBar = screen === 'dashboard' || (screen !== 'session' && screen !== 'finisher' && screen !== 'editor');
 
+  // Sur vrai mobile : plein écran, sans frame iOS fictif ni barre de statut/home dupliquée
+  const isMobileDevice = React.useMemo(() =>
+    window.innerWidth <= 500 || /iPhone|iPad|iPod|Android/i.test(navigator.userAgent), []);
+
+  const tweaksPanelNode = (
+    <TweaksPanel>
+      <TweakSection title="Couleurs">
+        <TweakColor id="accentColor" label="Accent" value={tweaks.accentColor} onChange={v => setTweak('accentColor', v)} />
+        <TweakColor id="bgColor" label="Fond" value={tweaks.bgColor} onChange={v => setTweak('bgColor', v)} />
+        <TweakColor id="cardColor" label="Carte" value={tweaks.cardColor} onChange={v => setTweak('cardColor', v)} />
+      </TweakSection>
+      <TweakSection title="Planning">
+        <TweakRadio id="planning" label="Défaut" options={['5j', '4j']} value={tweaks.planning} onChange={v => { setTweak('planning', v); setPlanning(v); saveState('planning', v); }} />
+      </TweakSection>
+    </TweaksPanel>
+  );
+
+  const appBody = (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: bgColor, fontFamily: 'DM Sans, sans-serif', paddingTop: isMobileDevice ? 0 : 59 }}>
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        {renderScreen()}
+      </div>
+      {showTabBar && <TabBar active={tab} onChange={(t) => { setTab(t); setScreen('dashboard'); }} accentColor={accentColor} textMuted={textMuted} />}
+    </div>
+  );
+
+  if (isMobileDevice) {
+    return (
+      <div style={{ width: '100%', minHeight: '100dvh', background: bgColor, display: 'flex', flexDirection: 'column' }}>
+        {appBody}
+        {tweaksPanelNode}
+      </div>
+    );
+  }
+
   return (
     <IOSDevice dark={true}>
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: bgColor, fontFamily: 'DM Sans, sans-serif', paddingTop: 59 }}>
-        <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-          {renderScreen()}
-        </div>
-        {showTabBar && <TabBar active={tab} onChange={(t) => { setTab(t); setScreen('dashboard'); }} accentColor={accentColor} textMuted={textMuted} />}
-      </div>
-
-      <TweaksPanel>
-        <TweakSection title="Couleurs">
-          <TweakColor id="accentColor" label="Accent" value={tweaks.accentColor} onChange={v => setTweak('accentColor', v)} />
-          <TweakColor id="bgColor" label="Fond" value={tweaks.bgColor} onChange={v => setTweak('bgColor', v)} />
-          <TweakColor id="cardColor" label="Carte" value={tweaks.cardColor} onChange={v => setTweak('cardColor', v)} />
-        </TweakSection>
-        <TweakSection title="Planning">
-          <TweakRadio id="planning" label="Défaut" options={['5j', '4j']} value={tweaks.planning} onChange={v => { setTweak('planning', v); setPlanning(v); saveState('planning', v); }} />
-        </TweakSection>
-      </TweaksPanel>
+      {appBody}
+      {tweaksPanelNode}
     </IOSDevice>
   );
 }
