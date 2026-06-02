@@ -413,7 +413,8 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   const [editingRest, setEditingRest] = useState(false);
   const [customRest, setCustomRest] = useState(null);
   const intervalRef = useRef(null);
-  const timerDoneRef = useRef(false); // signal: timer hit 0 naturellement
+  const timerDoneRef = useRef(false);  // signal: timer hit 0 naturellement
+  const timerEndTimeRef = useRef(null); // timestamp absolu de fin (résistant au throttling mobile)
 
   // Refs to hold latest values for the timer callback (avoids stale closures)
   const serieIdxRef = useRef(serieIdx);
@@ -485,28 +486,46 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
     });
   }, [serieIdx, exerciceIdx]);
 
-  // Timer effect: only depends on timerActive, uses ref-based interval
-  // IMPORTANT: on ne fait JAMAIS setState(setState) — anti-pattern qui casse sur mobile.
-  // La progression de série se déclenche dans l'effect timerLeft ci-dessous.
+  // Timer effect — timestamp-based pour résister au throttling iOS/Android en arrière-plan.
+  // On calcule le restant via (heureFinale - Date.now()) à chaque tick,
+  // donc même si le browser ralentit les ticks, la valeur affichée reste juste.
   useEffect(() => {
     if (timerActive) {
       clearInterval(intervalRef.current);
       intervalRef.current = setInterval(() => {
-        setTimerLeft(t => {
-          if (t <= 1) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-            timerDoneRef.current = true; // signal pour l'effect suivant
-            return 0;
-          }
-          return t - 1;
-        });
-      }, 1000);
+        const remaining = timerEndTimeRef.current
+          ? Math.max(0, Math.ceil((timerEndTimeRef.current - Date.now()) / 1000))
+          : 0;
+        if (remaining <= 0) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+          timerDoneRef.current = true;
+          setTimerLeft(0);
+        } else {
+          setTimerLeft(remaining);
+        }
+      }, 250); // tick rapide (250ms) pour une correction immédiate au retour de l'arrière-plan
     } else {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
     return () => { clearInterval(intervalRef.current); intervalRef.current = null; };
+  }, [timerActive]);
+
+  // Correction immédiate quand l'utilisateur revient sur l'app (visibilitychange)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && timerActive && timerEndTimeRef.current) {
+        const remaining = Math.max(0, Math.ceil((timerEndTimeRef.current - Date.now()) / 1000));
+        setTimerLeft(remaining);
+        if (remaining <= 0) {
+          timerDoneRef.current = true;
+          setTimerActive(false);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [timerActive]);
 
   // Réagit quand le timer atteint 0 naturellement (hors updater setState)
@@ -522,7 +541,8 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   function skipRest() {
     clearInterval(intervalRef.current);
     intervalRef.current = null;
-    timerDoneRef.current = false; // annule tout signal pending
+    timerDoneRef.current = false;
+    timerEndTimeRef.current = null;
     setTimerActive(false);
     setTimerLeft(0);
     advanceToNext();
@@ -532,9 +552,9 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
     clearInterval(intervalRef.current);
     intervalRef.current = null;
     const rest = currentRest;
+    timerEndTimeRef.current = Date.now() + rest * 1000; // timestamp absolu de fin
     setTimerLeft(rest);
     setTimerTotal(rest);
-    // Use setTimeout to ensure state is flushed before restarting
     setTimeout(() => setTimerActive(true), 0);
   }
 
@@ -666,7 +686,7 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
               </div>
             </div>
             <button onClick={skipRest} style={{ background: 'transparent', border: '1px solid #333', borderRadius: 10, color: textMuted, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>Passer →</button>
-            <button onClick={() => { setTimerLeft(t => t + 30); setTimerTotal(t => t + 30); }} style={{ background: accentColor + '20', border: `1px solid ${accentColor}40`, borderRadius: 10, color: accentColor, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>+30 sec</button>
+            <button onClick={() => { if (timerEndTimeRef.current) timerEndTimeRef.current += 30000; setTimerLeft(t => t + 30); setTimerTotal(t => t + 30); }} style={{ background: accentColor + '20', border: `1px solid ${accentColor}40`, borderRadius: 10, color: accentColor, padding: '8px 24px', fontFamily: 'DM Sans', fontSize: 14, cursor: 'pointer' }}>+30 sec</button>
 
           </div>
         )}
