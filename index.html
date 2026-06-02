@@ -452,6 +452,39 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
     }
   }
 
+  // Carry-over du poids : quand serieIdx ou exerciceIdx change,
+  // pré-remplit la série courante si elle n'a pas encore de charge.
+  // Priorité : (1) série précédente dans la même séance, (2) historique dernière séance.
+  useEffect(() => {
+    const key = exercices[exerciceIdx]?.id;
+    if (!key) return;
+    setExerciseLoads(prev => {
+      const exLoads = prev[key] || {};
+      // Déjà une valeur → on ne touche pas
+      if (exLoads[serieIdx] !== undefined && exLoads[serieIdx] !== '') return prev;
+      // (1) Reprend la série précédente dans la même séance
+      if (serieIdx > 0) {
+        for (let i = serieIdx - 1; i >= 0; i--) {
+          if (exLoads[i] !== undefined && exLoads[i] !== '') {
+            return { ...prev, [key]: { ...exLoads, [serieIdx]: exLoads[i] } };
+          }
+        }
+      }
+      // (2) Première série de l'exercice : pré-remplit depuis le dernier historique
+      const history = loadState('exercise_load_history', {});
+      const exHistory = history[key];
+      if (exHistory && exHistory.length > 0) {
+        const lastEntry = exHistory[exHistory.length - 1];
+        const loads = Object.values(lastEntry.loads).map(Number).filter(v => v > 0);
+        if (loads.length > 0) {
+          const maxLoad = String(Math.max(...loads));
+          return { ...prev, [key]: { ...exLoads, [serieIdx]: maxLoad } };
+        }
+      }
+      return prev;
+    });
+  }, [serieIdx, exerciceIdx]);
+
   // Timer effect: only depends on timerActive, uses ref-based interval
   // IMPORTANT: on ne fait JAMAIS setState(setState) — anti-pattern qui casse sur mobile.
   // La progression de série se déclenche dans l'effect timerLeft ci-dessous.
@@ -509,6 +542,23 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
     const key = current.id;
     const existing = completedSeries[key] || [];
     if (existing.includes(serieIdx)) return;
+
+    // ── Sauvegarde immédiate de la charge (pas besoin d'attendre la fin de séance) ──
+    const currentLoad = exerciseLoads[key]?.[serieIdx];
+    if (currentLoad && Number(currentLoad) > 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      const history = loadState('exercise_load_history', {});
+      if (!history[key]) history[key] = [];
+      const todayIdx = history[key].findIndex(e => e.date === today);
+      if (todayIdx >= 0) {
+        history[key][todayIdx].loads = { ...history[key][todayIdx].loads, [serieIdx]: currentLoad };
+      } else {
+        history[key].push({ date: today, loads: { [serieIdx]: currentLoad } });
+        if (history[key].length > 30) history[key] = history[key].slice(-30);
+      }
+      saveState('exercise_load_history', history);
+    }
+
     const updated = { ...completedSeries, [key]: [...existing, serieIdx] };
     setCompletedSeries(updated);
     startRest();
@@ -801,6 +851,12 @@ function FinisherScreen({ finisher, tweaks, onBack, onDone }) {
         </button>
         {finished && (
           <button onClick={onDone} style={{ padding: '14px 40px', border: 'none', borderRadius: 14, background: '#22C55E', color: '#fff', fontFamily: 'DM Sans', fontWeight: 700, fontSize: 17, cursor: 'pointer' }}>✓ Terminé !</button>
+        )}
+        {/* Passer le finisher sans le faire */}
+        {!finished && (
+          <button onClick={onDone} style={{ padding: '10px 28px', border: '1px solid #333', borderRadius: 12, background: 'transparent', color: textMuted, fontFamily: 'DM Sans', fontWeight: 500, fontSize: 14, cursor: 'pointer' }}>
+            Passer →
+          </button>
         )}
       </div>
     </div>
