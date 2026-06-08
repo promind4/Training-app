@@ -249,6 +249,37 @@ function Dashboard({ tweaks, onStartSession, onChoosePlanning, onEditSession }) 
   const [completedSessions, setCompletedSessions] = useState(() => loadState('completed_sessions', []));
   const weekSessions = planning.filter(s => completedSessions.includes(s.id));
 
+  function toggleSessionComplete(e, session) {
+    e.stopPropagation();
+    const done = completedSessions.includes(session.id);
+    const today = new Date().toISOString().slice(0, 10);
+    if (done) {
+      const updated = completedSessions.filter(id => id !== session.id);
+      setCompletedSessions(updated);
+      saveState('completed_sessions', updated);
+      
+      const log = loadState('session_log', []);
+      const idx = log.slice().reverse().findIndex(s => s.session === session.nom && s.date === today);
+      if (idx !== -1) {
+        const realIdx = log.length - 1 - idx;
+        log.splice(realIdx, 1);
+        saveState('session_log', log);
+      }
+    } else {
+      const updated = [...completedSessions, session.id];
+      setCompletedSessions(updated);
+      saveState('completed_sessions', updated);
+      
+      const log = loadState('session_log', []);
+      saveState('session_log', [...log, { 
+        date: today, 
+        session: session.nom, 
+        duration: session.duree_min,
+        loads: {} 
+      }]);
+    }
+  }
+
   function switchPlanning(p) {
     setSelectedPlanning(p);
     saveState('planning', p);
@@ -383,11 +414,9 @@ function Dashboard({ tweaks, onStartSession, onChoosePlanning, onEditSession }) 
                       {session.jour} · {session.duree_min} min{session.optionnel ? <span style={{ color: '#555' }}> · optionnel</span> : null}
                     </div>
                   </div>
-                  {done ? (
-                    <div style={{ width: 24, height: 24, borderRadius: '50%', background: '#22C55E', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>✓</div>
-                  ) : (
-                    <div style={{ fontSize: 18, color: '#333' }}>›</div>
-                  )}
+                  <button onClick={(e) => toggleSessionComplete(e, session)} style={{ width: 30, height: 30, borderRadius: '50%', background: done ? '#22C55E' : '#2A2A2A', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', color: done ? '#fff' : textMuted, cursor: 'pointer', flexShrink: 0, fontSize: 14, transition: 'all 0.2s' }}>
+                    {done ? '✓' : '›'}
+                  </button>
                 </div>
                 <button onClick={() => onEditSession(session)} style={{ background: '#2A2A2A', border: 'none', borderRadius: 8, padding: '6px 10px', color: textMuted, fontSize: 14, cursor: 'pointer', flexShrink: 0 }}>✎</button>
               </div>
@@ -416,19 +445,9 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
   const timerDoneRef = useRef(false);  // signal: timer hit 0 naturellement
   const timerEndTimeRef = useRef(null); // timestamp absolu de fin (résistant au throttling mobile)
 
-  // Refs to hold latest values for the timer callback (avoids stale closures)
-  const serieIdxRef = useRef(serieIdx);
-  const exerciceIdxRef = useRef(exerciceIdx);
-  const timerActiveRef = useRef(timerActive);
-  useEffect(() => { serieIdxRef.current = serieIdx; }, [serieIdx]);
-  useEffect(() => { exerciceIdxRef.current = exerciceIdx; }, [exerciceIdx]);
-  useEffect(() => { timerActiveRef.current = timerActive; }, [timerActive]);
-
   const exercices = session.exercices;
   const current = exercices[exerciceIdx];
   const totalSeries = current?.series || 1;
-  const totalSeriesRef = useRef(totalSeries);
-  useEffect(() => { totalSeriesRef.current = totalSeries; }, [totalSeries]);
   const currentRest = customRest !== null ? customRest : (current?.repos_sec || 60);
 
   // Load history from localStorage for current exercise
@@ -441,13 +460,10 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
 
   // Advance to next serie or exercise
   function advanceToNext() {
-    const curSerie = serieIdxRef.current;
-    const curExo = exerciceIdxRef.current;
-    const curTotalSeries = totalSeriesRef.current;
-    if (curSerie < curTotalSeries - 1) {
-      setSerieIdx(curSerie + 1);
-    } else if (curExo < exercices.length - 1) {
-      setExerciceIdx(curExo + 1);
+    if (serieIdx < totalSeries - 1) {
+      setSerieIdx(serieIdx + 1);
+    } else if (exerciceIdx < exercices.length - 1) {
+      setExerciceIdx(exerciceIdx + 1);
       setSerieIdx(0);
       setCustomRest(null);
     }
@@ -699,10 +715,22 @@ function SessionScreen({ session, tweaks, onBack, onFinisher, onComplete }) {
               const done = (completedSeries[current?.id] || []).includes(i);
               const active = i === serieIdx && !timerActive;
               return (
-                <div key={i} style={{
+                <div key={i} onClick={() => {
+                  setSerieIdx(i);
+                  setTimerActive(false);
+                  setTimerLeft(0);
+                  clearInterval(intervalRef.current);
+                  if (done) {
+                    setCompletedSeries(prev => ({
+                      ...prev,
+                      [current.id]: (prev[current.id] || []).filter(s => s !== i)
+                    }));
+                  }
+                }} style={{
                   display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 10,
                   background: active ? accentColor + '20' : '#1A1A1A',
-                  border: `1px solid ${active ? accentColor + '40' : 'transparent'}`, opacity: done ? 0.5 : 1
+                  border: `1px solid ${active ? accentColor + '40' : 'transparent'}`, opacity: done ? 0.5 : 1,
+                  cursor: 'pointer'
                 }}>
                   <div style={{ width: 24, height: 24, borderRadius: '50%', border: `2px solid ${done ? '#22C55E' : active ? accentColor : '#333'}`, background: done ? '#22C55E' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: done ? '#fff' : 'transparent' }}>✓</div>
                   <div style={{ flex: 1, fontSize: 14, color: done ? textMuted : textPrimary, fontWeight: active ? 600 : 400 }}>Série {i + 1} — {current?.reps} reps</div>
@@ -1156,7 +1184,12 @@ function HistoryScreen({ tweaks }) {
         <polyline points={pts.join(' ')} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
         {values.map((v, i) => {
           const x = (i / (values.length - 1)) * W, y = H - ((v - min) / (max - min)) * H;
-          return <circle key={i} cx={x} cy={y} r="3" fill={color} />;
+          return (
+            <g key={i}>
+              <circle cx={x} cy={y} r="4" fill={color} />
+              <text x={x} y={y - 10} fill={color} fontSize="11" fontWeight="700" fontFamily="DM Mono" textAnchor="middle">{v}</text>
+            </g>
+          );
         })}
       </svg>
     );
@@ -1286,23 +1319,7 @@ function HistoryScreen({ tweaks }) {
             </div>
           ))}
         </div>
-        {sessionLog.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ fontSize: 11, color: textMuted, fontWeight: 600, marginBottom: 4 }}>Dernières séances</div>
-            {[...sessionLog].reverse().slice(0, 5).map((s, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', borderRadius: 8, background: '#1A1A1A' }}>
-                <div style={{ fontSize: 16 }}>🏋️</div>
-                <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: textPrimary }}>{s.session}</span>
-                  <span style={{ fontSize: 11, color: textMuted, marginLeft: 8 }}>
-                    {new Date(s.date).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
-                  </span>
-                </div>
-                <span style={{ fontSize: 11, color: accentColor, fontFamily: 'DM Mono', fontWeight: 600 }}>{s.duration} min</span>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Dernières séances masquées comme demandé */}
         {sessionLog.length === 0 && <div style={{ fontSize: 13, color: textMuted, textAlign: 'center', padding: '8px 0' }}>Aucune séance enregistrée</div>}
       </div>
     </div>
